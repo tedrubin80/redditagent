@@ -1,0 +1,9 @@
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      BIND_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
