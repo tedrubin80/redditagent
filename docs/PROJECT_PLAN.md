@@ -1,6 +1,6 @@
 # Reddit Agent: project plan
 
-**Status:** Phase 0 foundation. This document is a proposed roadmap, not a claim that future features exist. Last reviewed October 31, 2026.
+**Status:** Phase 2 read-only monitoring in progress (Phase 0 foundation shipped). Phase 1 access decisions remain a human checklist. This document is a proposed roadmap, not a claim that later AI/posting features exist. Last reviewed October 31, 2026.
 
 ## Goal
 
@@ -19,9 +19,20 @@ Give Ted a self-hosted workspace to find relevant Reddit discussions, assess com
 
 `Reddit adapter → ingestion and filtering → review queue → optional AI draft → human decision`
 
-A local web dashboard controls project settings and displays only authorized data. A small worker handles scheduled reads with rate-limit headers, backoff, deletion checks and a kill switch. SQLite is a practical initial store; a pluggable storage layer can accommodate Postgres later. AI is optional and lives behind a provider interface. API credentials and provider keys remain in environment variables or a secret manager, never in Git or browser code. A posting integration is a separate gated phase, not a requirement for the MVP.
+Aligned with Metaflow’s LURK framing: **Listen** (allowlisted monitoring), **Understand** (community notes / rules context), **Reply** (human-approved helpful drafts later), **Keep** (logs, pause, deletion reconciliation).
 
-## Phase 0 — Foundation (this branch)
+A local web dashboard controls project settings and displays only authorized data. Polling is explicit (CLI or dashboard button) in Phase 2; a scheduled worker can come later. Client-side pacing (~60 req/min) plus 429 backoff is included. SQLite is the initial store. AI is optional and lives behind a provider interface later. API credentials remain in environment variables, never in Git or browser code. Posting is a separate gated phase, not part of the MVP.
+
+## Mapping to the Metaflow guide
+
+| LURK step | This repo |
+|---|---|
+| Listen | Phase 2: `agent.monitor` + allowlisted settings |
+| Understand | Phase 1/2: `community_notes` + human review of rules |
+| Reply | Phase 4 drafts; Phase 5 optional posting (gated) |
+| Keep | Phase 2+: SQLite match history, pause switch, deletion marks, status API |
+
+## Phase 0 — Foundation (shipped)
 
 **Deliverables:** Python standard-library service and status page; configuration template; explicitly invoked app-only OAuth check; Docker/Compose; basic tests; this plan. No background activity, Reddit data collection, AI calls or posting.
 
@@ -33,14 +44,18 @@ A local web dashboard controls project settings and displays only authorized dat
 - Select first project, purpose, communities, keywords, excluded terms and human-review workflow. Document each community's rules and approval requirements.
 - Decide whether Reddit content may be sent to the chosen LLM provider under current terms, and whether an integration must run on Devvit.
 
+**Working docs:** [PHASE1_CHECKLIST.md](PHASE1_CHECKLIST.md) and `config/settings.example.json`.
+
 **Exit:** documented approval/permission decisions, selected MVP scope and a credential check against the real app. If permissions do not support the proposed use, stop that integration and revise scope; do not scrape or bypass access controls.
 
-## Phase 2 — Read-only monitoring
+## Phase 2 — Read-only monitoring (current build)
 
 - Add a Reddit provider interface and authorized implementation; support OAuth as appropriate for approved credentials. Consume documented limits and respond to 429s with backoff; no limit bypass.
 - Configure a small allowlist of subreddits, keywords, polling frequency, deduplication and exclusion rules. Provide a pause switch and explicit last-run/error status.
 - Reconcile deleted content and accounts, implement retention and minimal audit logs, and verify behavior against Reddit's current deletion requirements before persisting data.
 - Display matched threads with links, rule context, reasons for a match and an ignore action.
+
+**Implemented in-repo:** `OAuthRedditProvider`, JSON settings allowlist, SQLite store, `run_monitor` / dashboard poll, pause + ignore, keyword/exclude matching, `/api/info` deletion reconciliation, mocked unit tests. Still open: Ted’s live credential pilot, retention policy validation, and scheduled (non-manual) polling if desired.
 
 **Exit:** tests with mocked API responses, rate limits, deletions and failures; approved real-world read-only pilot produces relevant matches without posting. Exact retention needs policy validation.
 

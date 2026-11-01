@@ -1,0 +1,10 @@
+{
+  "project_name": "example-project",
+  "subreddits": ["askhistorians"],
+  "keywords": ["archive", "primary source"],
+  "exclude_terms": ["buy now", "discount code", "promo code"],
+  "poll_limit": 25,
+  "community_notes": {
+    "askhistorians": "Sources required; speculative answers removed. Treat as promo-hostile until a human confirms otherwise."
+  }
+}

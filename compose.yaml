@@ -4,6 +4,11 @@ services:
     env_file: .env
     environment:
       BIND_HOST: 0.0.0.0
+      DATA_DIR: /app/data
+      SETTINGS_PATH: /app/data/settings.json
+      DB_PATH: /app/data/agent.db
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/app/data
     restart: unless-stopped
