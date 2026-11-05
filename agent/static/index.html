@@ -10,15 +10,43 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <div id="setup-overlay" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <div class="setup-box">
+      <div class="setup-logo">
+        <p class="eyebrow">Reddit Agent · first-time setup</p>
+        <h2 id="setup-title">Connect to treg.to</h2>
+        <p class="muted">All Reddit data comes through <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Paste your team token to get started — no Reddit OAuth account needed.</p>
+      </div>
+      <form id="setup-form" class="setup-form" autocomplete="off">
+        <label>treg.to token <span class="hint">required · get one at <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a></span>
+          <input name="treg_token" id="setup-token" type="password" required placeholder="treg_…" autocomplete="new-password" spellcheck="false">
+        </label>
+        <details class="setup-optional">
+          <summary>Dashboard password <span class="hint">(optional — set before exposing beyond localhost)</span></summary>
+          <div class="setup-optional-fields">
+            <label>Username
+              <input name="dashboard_user" type="text" placeholder="admin" autocomplete="new-password">
+            </label>
+            <label>Password
+              <input name="dashboard_password" type="password" placeholder="••••••••" autocomplete="new-password">
+            </label>
+          </div>
+        </details>
+        <p id="setup-error" class="setup-error hidden"></p>
+        <button type="submit" class="btn primary" id="btn-setup-save">Save and start</button>
+      </form>
+    </div>
+  </div>
+
   <div class="shell">
     <header class="top">
       <div class="brand-block">
         <p class="eyebrow">LURK · listen stage</p>
         <h1>Reddit Agent</h1>
-        <p class="lede">Human-led match review. Read-only — no AI drafts, no posting.</p>
+        <p class="lede">Human-led match review via <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Read-only — no AI drafts, no posting.</p>
       </div>
       <div class="top-actions">
-        <button type="button" id="btn-check" class="btn ghost">Check Reddit</button>
+        <button type="button" id="btn-check" class="btn ghost">Check treg</button>
         <button type="button" id="btn-pause" class="btn ghost">Pause</button>
         <button type="button" id="btn-poll" class="btn primary">Run poll</button>
       </div>
@@ -132,6 +160,23 @@
           <button type="submit" class="btn primary">Save settings</button>
         </form>
         <div class="counts" id="counts"></div>
+
+        <details class="creds-section" id="creds-section">
+          <summary class="creds-summary">Credentials <span class="hint">treg token &amp; dashboard auth</span></summary>
+          <form id="creds-form" class="settings-form" autocomplete="off" style="margin-top:.75rem">
+            <label>treg.to token <span class="hint">leave blank to keep current</span>
+              <input name="treg_token" type="password" placeholder="treg_…" autocomplete="new-password" spellcheck="false">
+            </label>
+            <label>Dashboard username
+              <input name="dashboard_user" type="text" placeholder="admin" autocomplete="new-password">
+            </label>
+            <label>Dashboard password
+              <input name="dashboard_password" type="password" placeholder="••••••••" autocomplete="new-password">
+            </label>
+            <p class="muted" style="font-size:.85rem;margin:0">Leave a field blank to keep its current value. Changes take effect immediately without restart.</p>
+            <button type="submit" class="btn primary compact">Update credentials</button>
+          </form>
+        </details>
       </aside>
     </main>
 

@@ -1,8 +1,7 @@
 """Reddit provider backed by treg.to — no Reddit OAuth required.
 
 Calls treg's proxy to Crawl4AI and TikHub endpoints.  Set TREG_TOKEN (a team
-agent token or dashboard API key) to enable this provider.  When the env var is
-absent, the server falls back to the standard OAuthRedditProvider.
+agent token or dashboard API key from https://treg.to) to run the agent.
 
 Pricing (treg metered from your prepaid balance):
   - list_new_posts / search_posts : crawl4ai.reddit.subreddit.posts or

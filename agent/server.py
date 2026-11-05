@@ -16,9 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import AppPaths, RedditConfig, TregConfig
+from .config import AppPaths
 from .monitor import poll_once
-from .reddit import OAuthRedditProvider, RedditError, check_connection
+from . import secrets as _secrets
 from .settings import MonitorSettings
 from .store import Store
 from .treg_reddit import TregError, TregRedditProvider
@@ -39,24 +39,27 @@ def _load_settings() -> MonitorSettings:
     return MonitorSettings.load(_paths().settings_path)
 
 
-def _make_provider():
-    """Return TregRedditProvider when TREG_TOKEN is set, else OAuthRedditProvider."""
-    treg_cfg = TregConfig.from_env()
-    if treg_cfg:
-        return TregRedditProvider(treg_cfg.token)
-    return OAuthRedditProvider(RedditConfig.from_env())
+def _make_provider() -> TregRedditProvider:
+    """Return the treg.to Reddit provider. Raises if TREG_TOKEN is not configured."""
+    token = _secrets.get_treg_token(_paths().data_dir)
+    if not token:
+        raise ValueError(
+            "TREG_TOKEN is not configured. Open the dashboard and use the Setup tab to enter your token — get one at https://treg.to"
+        )
+    return TregRedditProvider(token)
+
+
+def _is_configured() -> bool:
+    """True when a treg token is available (env or secrets file)."""
+    return bool(_secrets.get_treg_token(_paths().data_dir))
 
 
 def _provider_name() -> str:
-    return "treg" if TregConfig.from_env() else "reddit-oauth"
+    return "treg"
 
 
 def _auth_configured() -> tuple[str, str] | None:
-    user = os.environ.get("DASHBOARD_USER", "").strip()
-    password = os.environ.get("DASHBOARD_PASSWORD", "").strip()
-    if user and password:
-        return user, password
-    return None
+    return _secrets.get_dashboard_creds(_paths().data_dir)
 
 
 def _settings_payload(settings: MonitorSettings | None = None, error: str | None = None) -> dict:
@@ -84,16 +87,19 @@ def _status_payload() -> dict:
         settings_block = _settings_payload(_load_settings())
     except ValueError as exc:
         settings_block = _settings_payload(error=str(exc))
+    creds = _auth_configured()
     return {
         "phase": PHASE,
         "provider": _provider_name(),
+        "configured": _is_configured(),
         "paused": status.paused,
         "last_run_at": status.last_run_at,
         "last_error": status.last_error,
         "last_found": status.last_found,
         "last_message": status.last_message,
         "counts": store.counts(),
-        "auth_required": _auth_configured() is not None,
+        "auth_required": creds is not None,
+        "dashboard_user_set": creds is not None,
         **settings_block,
     }
 
@@ -153,7 +159,15 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         # Health stays unauthenticated for container probes.
         if path == "/health":
-            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused()})
+            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused(), "configured": _is_configured()})
+        # /api/setup is open (no auth gate) so the dashboard can bootstrap.
+        if path == "/api/setup":
+            creds = _auth_configured()
+            return self._json(200, {
+                "configured": _is_configured(),
+                "dashboard_user_set": creds is not None,
+                "dashboard_user": creds[0] if creds else "",
+            })
         if not self._authorized():
             return self._unauthorized()
         if path in ("/", "/index.html"):
@@ -193,17 +207,16 @@ class Handler(BaseHTTPRequestHandler):
             if not query:
                 return self._json(400, {"ok": False, "error": "q (search query) is required"})
             try:
-                provider = _make_provider()
-                if not isinstance(provider, TregRedditProvider):
-                    return self._json(400, {"ok": False, "error": "Search requires TREG_TOKEN to be set."})
-                posts = provider.search_posts(query, subreddit=subreddit, limit=limit, sort=sort, timeframe=timeframe)
+                posts = _make_provider().search_posts(
+                    query, subreddit=subreddit, limit=limit, sort=sort, timeframe=timeframe
+                )
                 return self._json(200, {
                     "ok": True,
                     "query": query,
                     "subreddit": subreddit,
                     "results": [_post_to_dict(p) for p in posts],
                 })
-            except TregError as exc:
+            except (ValueError, TregError) as exc:
                 return self._json(502, {"ok": False, "error": str(exc)})
 
         if path.startswith("/api/matches/") and path.endswith("/comments"):
@@ -222,23 +235,52 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 100
             try:
-                provider = _make_provider()
-                if not isinstance(provider, TregRedditProvider):
-                    return self._json(400, {"ok": False, "error": "Comments require TREG_TOKEN to be set."})
-                comments = provider.fetch_comments(match.url, limit=limit)
+                comments = _make_provider().fetch_comments(match.url, limit=limit)
                 return self._json(200, {"ok": True, "match_id": match_id, "comments": comments})
-            except TregError as exc:
+            except (ValueError, TregError) as exc:
                 return self._json(502, {"ok": False, "error": str(exc)})
 
         self.send_error(404)
 
     def do_POST(self):
-        if not self._authorized():
-            return self._unauthorized()
         parsed = urlparse(self.path)
         path = parsed.path
         raw = self._read_body()
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
+        # /api/setup is open when nothing is configured yet (bootstrap);
+        # once a token is saved it requires dashboard auth.
+        if path == "/api/setup":
+            already_configured = _is_configured()
+            if already_configured and not self._authorized():
+                return self._unauthorized()
+            data = self._parse_body(raw, content_type)
+            token = str(data.get("treg_token") or "").strip()
+            dash_user = str(data.get("dashboard_user") or "").strip()
+            dash_pass = str(data.get("dashboard_password") or "").strip()
+            if not token and not already_configured:
+                return self._json(400, {"ok": False, "error": "treg_token is required"})
+            updates: dict = {}
+            if token:
+                updates["treg_token"] = token
+            if dash_user:
+                updates["dashboard_user"] = dash_user
+            if dash_pass:
+                updates["dashboard_password"] = dash_pass
+            # Clearing dashboard creds explicitly
+            if data.get("clear_dashboard_auth"):
+                updates["dashboard_user"] = ""
+                updates["dashboard_password"] = ""
+            if updates:
+                _secrets.save(_paths().data_dir, updates)
+            return self._json(200, {
+                "ok": True,
+                "configured": _is_configured(),
+                "dashboard_user_set": _auth_configured() is not None,
+            })
+
+        if not self._authorized():
+            return self._unauthorized()
 
         if path == "/api/poll" or path == "/poll":
             store = _store()
@@ -258,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/poll":
                     return self._redirect("/")
                 return self._json(200, payload)
-            except (ValueError, RedditError) as exc:
+            except (ValueError, TregError) as exc:
                 store.record_run(found=0, message=f"Poll failed: {exc}", error=str(exc))
                 if path == "/poll":
                     return self._redirect("/")
@@ -282,9 +324,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 provider = _make_provider()
                 provider.check_connection()
-                name = _provider_name()
-                return self._json(200, {"ok": True, "message": f"Connection via {name} succeeded.", "provider": name})
-            except (ValueError, RedditError, TregError) as exc:
+                return self._json(200, {"ok": True, "message": "treg.to connection succeeded.", "provider": "treg"})
+            except (ValueError, TregError) as exc:
                 return self._json(400, {"ok": False, "error": str(exc)})
 
         if path == "/ignore":

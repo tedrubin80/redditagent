@@ -6,6 +6,50 @@
   let busy = false;
   let refreshTimer = null;
 
+  // ---- Setup overlay ----
+  const setupOverlay = $("#setup-overlay");
+  const setupForm = $("#setup-form");
+  const setupError = $("#setup-error");
+
+  function showSetup() {
+    if (setupOverlay) setupOverlay.classList.remove("hidden");
+  }
+  function hideSetup() {
+    if (setupOverlay) setupOverlay.classList.add("hidden");
+  }
+
+  if (setupForm) {
+    setupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      setupError.classList.add("hidden");
+      const btn = $("#btn-setup-save");
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      const payload = {
+        treg_token: setupForm.treg_token.value.trim(),
+        dashboard_user: setupForm.dashboard_user?.value.trim() || "",
+        dashboard_password: setupForm.dashboard_password?.value.trim() || "",
+      };
+      try {
+        const res = await api("/api/setup", { method: "POST", body: JSON.stringify(payload) });
+        if (res.ok) {
+          hideSetup();
+          await refresh();
+          showBanner("Setup complete — treg.to connected.", "ok");
+        } else {
+          setupError.textContent = res.error || "Setup failed.";
+          setupError.classList.remove("hidden");
+        }
+      } catch (err) {
+        setupError.textContent = err.message || String(err);
+        setupError.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Save and start";
+      }
+    });
+  }
+
   function showBanner(message, kind = "ok") {
     banner.textContent = message;
     banner.className = `banner ${kind}`;
@@ -78,18 +122,16 @@
     if (status.last_error) $("#stat-message").style.color = "var(--warn)";
     else $("#stat-message").style.color = "";
 
-    const provider = status.provider || "reddit-oauth";
     const providerEl = $("#stat-provider");
     if (providerEl) {
-      providerEl.textContent = provider === "treg" ? "treg.to" : "Reddit OAuth";
-      providerEl.title = provider === "treg"
-        ? "Powered by treg.to (Crawl4AI + TikHub)"
-        : "Reddit app-only OAuth";
+      providerEl.textContent = "treg.to";
+      providerEl.title = "Powered by treg.to (Crawl4AI + TikHub)";
     }
-    // Show/hide search panel based on whether treg is available.
-    const searchSection = $("#search-section");
-    if (searchSection) {
-      searchSection.style.display = provider === "treg" ? "" : "none";
+
+    if (status.configured === false) {
+      showSetup();
+    } else {
+      hideSetup();
     }
 
     const pauseBtn = $("#btn-pause");
@@ -277,6 +319,30 @@
       "Settings saved."
     );
   });
+
+  // ---- Credentials form (settings panel) ----
+  const credsForm = $("#creds-form");
+  if (credsForm) {
+    credsForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        treg_token: credsForm.treg_token.value.trim() || undefined,
+        dashboard_user: credsForm.dashboard_user.value.trim() || undefined,
+        dashboard_password: credsForm.dashboard_password.value.trim() || undefined,
+      };
+      // Strip undefined keys
+      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+      if (!Object.keys(payload).length) {
+        showBanner("No changes — fill in at least one field.", "err");
+        return;
+      }
+      await withBusy(
+        () => api("/api/setup", { method: "POST", body: JSON.stringify(payload) }),
+        "Credentials updated."
+      );
+      credsForm.reset();
+    });
+  }
 
   // ---- Search ----
   const searchForm = $("#search-form");

@@ -282,6 +282,80 @@ label {
   to { opacity: 1; }
 }
 
+/* ---- Setup overlay ---- */
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background:
+    radial-gradient(900px 500px at 50% 20%, #ffe8d2 0%, transparent 60%),
+    linear-gradient(180deg, #efe8da 0%, var(--paper) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+.setup-overlay.hidden { display: none; }
+.setup-box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  box-shadow: 0 40px 100px rgba(26,31,28,0.14);
+  padding: 2.5rem 2.75rem 2.75rem;
+  width: min(520px, 100%);
+  animation: rise 0.4s ease both;
+}
+.setup-logo { margin-bottom: 2rem; }
+.setup-logo h2 {
+  margin: 0.4rem 0 0;
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 650;
+}
+.setup-logo .muted { margin-top: .6rem; line-height: 1.6; }
+.setup-form { display: grid; gap: 1rem; }
+.setup-optional { border: 1px solid var(--line); border-radius: 12px; padding: .75rem 1rem; }
+.setup-optional summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: .9rem;
+  list-style: none;
+  user-select: none;
+}
+.setup-optional summary::-webkit-details-marker { display: none; }
+.setup-optional summary::before { content: "▸ "; font-size: .8em; }
+details[open] > .setup-optional summary::before { content: "▾ "; }
+.setup-optional-fields { display: grid; gap: .75rem; margin-top: .85rem; }
+.setup-error {
+  margin: 0;
+  padding: .6rem .75rem;
+  background: #fdf1ef;
+  border: 1px solid #e8b7af;
+  border-radius: 10px;
+  color: var(--warn);
+  font-size: .9rem;
+}
+.setup-error.hidden { display: none; }
+.setup-form .btn { justify-self: start; margin-top: .25rem; }
+
+/* ---- Credentials section ---- */
+.creds-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.creds-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: .9rem;
+  list-style: none;
+  user-select: none;
+  color: var(--muted);
+}
+.creds-summary::-webkit-details-marker { display: none; }
+.creds-summary::before { content: "▸ "; font-size: .8em; }
+details[open] > .creds-summary::before { content: "▾ "; }
+
 /* ---- Provider badge ---- */
 .provider-badge {
   display: inline-block;
