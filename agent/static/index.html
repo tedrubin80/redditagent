@@ -45,8 +45,42 @@
         <span class="label">Message</span>
         <strong id="stat-message">Loading…</strong>
       </div>
+      <div class="stat">
+        <span class="label">Data source</span>
+        <strong id="stat-provider">—</strong>
+      </div>
     </section>
     <p id="banner" class="banner hidden" role="status"></p>
+
+    <section class="panel search-panel" aria-labelledby="search-heading" id="search-section">
+      <div class="panel-head">
+        <div>
+          <h2 id="search-heading">Live search <span class="provider-badge" id="search-badge">treg</span></h2>
+          <p class="muted">Search Reddit in real time via treg.to — results are not stored.</p>
+        </div>
+      </div>
+      <form id="search-form" class="search-form">
+        <div class="search-row">
+          <input name="q" id="search-q" type="search" placeholder="Search Reddit…" autocomplete="off" aria-label="Search query">
+          <input name="subreddit" id="search-sub" type="text" placeholder="r/subreddit (optional)" autocomplete="off" aria-label="Subreddit filter">
+          <select name="sort" id="search-sort">
+            <option value="relevance">Relevance</option>
+            <option value="new">New</option>
+            <option value="top">Top</option>
+            <option value="hot">Hot</option>
+          </select>
+          <select name="t" id="search-t">
+            <option value="all">All time</option>
+            <option value="day">Today</option>
+            <option value="week">This week</option>
+            <option value="month">This month</option>
+            <option value="year">This year</option>
+          </select>
+          <button type="submit" class="btn primary" id="btn-search">Search</button>
+        </div>
+      </form>
+      <div id="search-results" class="search-results hidden"></div>
+    </section>
 
     <main class="layout">
       <section class="panel queue" aria-labelledby="queue-heading">
@@ -101,9 +135,20 @@
       </aside>
     </main>
 
+    <div id="comments-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="comments-modal-title">
+      <div class="modal-backdrop"></div>
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3 id="comments-modal-title">Comments</h3>
+          <button type="button" class="btn ghost compact" id="btn-close-comments">✕ Close</button>
+        </div>
+        <div id="comments-list" class="comments-list"></div>
+      </div>
+    </div>
+
     <footer class="foot">
-      <span id="phase">phase3-dashboard</span>
-      · self-hosted · Docker-ready
+      <span id="phase">phase4-treg</span>
+      · self-hosted · Docker-ready · <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>
     </footer>
   </div>
   <script src="/static/app.js"></script>

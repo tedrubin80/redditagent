@@ -16,13 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import AppPaths, RedditConfig
+from .config import AppPaths, RedditConfig, TregConfig
 from .monitor import poll_once
 from .reddit import OAuthRedditProvider, RedditError, check_connection
 from .settings import MonitorSettings
 from .store import Store
+from .treg_reddit import TregError, TregRedditProvider
 
-PHASE = "phase3-dashboard"
+PHASE = "phase4-treg"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -36,6 +37,18 @@ def _store() -> Store:
 
 def _load_settings() -> MonitorSettings:
     return MonitorSettings.load(_paths().settings_path)
+
+
+def _make_provider():
+    """Return TregRedditProvider when TREG_TOKEN is set, else OAuthRedditProvider."""
+    treg_cfg = TregConfig.from_env()
+    if treg_cfg:
+        return TregRedditProvider(treg_cfg.token)
+    return OAuthRedditProvider(RedditConfig.from_env())
+
+
+def _provider_name() -> str:
+    return "treg" if TregConfig.from_env() else "reddit-oauth"
 
 
 def _auth_configured() -> tuple[str, str] | None:
@@ -73,6 +86,7 @@ def _status_payload() -> dict:
         settings_block = _settings_payload(error=str(exc))
     return {
         "phase": PHASE,
+        "provider": _provider_name(),
         "paused": status.paused,
         "last_run_at": status.last_run_at,
         "last_error": status.last_error,
@@ -81,6 +95,18 @@ def _status_payload() -> dict:
         "counts": store.counts(),
         "auth_required": _auth_configured() is not None,
         **settings_block,
+    }
+
+
+def _post_to_dict(post) -> dict:
+    return {
+        "fullname": post.fullname,
+        "subreddit": post.subreddit,
+        "title": post.title,
+        "url": post.url,
+        "author": post.author,
+        "created_utc": post.created_utc,
+        "selftext": post.selftext,
     }
 
 
@@ -153,6 +179,57 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, _settings_payload(_load_settings()))
             except ValueError as exc:
                 return self._json(404, _settings_payload(error=str(exc)))
+
+        if path == "/api/search":
+            qs = parse_qs(parsed.query)
+            query = (qs.get("q", [""])[0] or "").strip()
+            subreddit = (qs.get("subreddit", [""])[0] or "").strip().lstrip("r/") or None
+            try:
+                limit = min(50, max(1, int(qs.get("limit", ["25"])[0])))
+            except ValueError:
+                limit = 25
+            sort = (qs.get("sort", ["relevance"])[0] or "relevance").strip()
+            timeframe = (qs.get("t", ["all"])[0] or "all").strip()
+            if not query:
+                return self._json(400, {"ok": False, "error": "q (search query) is required"})
+            try:
+                provider = _make_provider()
+                if not isinstance(provider, TregRedditProvider):
+                    return self._json(400, {"ok": False, "error": "Search requires TREG_TOKEN to be set."})
+                posts = provider.search_posts(query, subreddit=subreddit, limit=limit, sort=sort, timeframe=timeframe)
+                return self._json(200, {
+                    "ok": True,
+                    "query": query,
+                    "subreddit": subreddit,
+                    "results": [_post_to_dict(p) for p in posts],
+                })
+            except TregError as exc:
+                return self._json(502, {"ok": False, "error": str(exc)})
+
+        if path.startswith("/api/matches/") and path.endswith("/comments"):
+            parts = path.split("/")
+            # /api/matches/<id>/comments → parts = ['', 'api', 'matches', '<id>', 'comments']
+            try:
+                match_id = int(parts[3])
+            except (IndexError, ValueError):
+                return self._json(400, {"ok": False, "error": "Invalid match id"})
+            match = _store().get_match(match_id)
+            if match is None:
+                return self._json(404, {"ok": False, "error": "Match not found"})
+            qs = parse_qs(parsed.query)
+            try:
+                limit = min(200, max(1, int(qs.get("limit", ["100"])[0])))
+            except ValueError:
+                limit = 100
+            try:
+                provider = _make_provider()
+                if not isinstance(provider, TregRedditProvider):
+                    return self._json(400, {"ok": False, "error": "Comments require TREG_TOKEN to be set."})
+                comments = provider.fetch_comments(match.url, limit=limit)
+                return self._json(200, {"ok": True, "match_id": match_id, "comments": comments})
+            except TregError as exc:
+                return self._json(502, {"ok": False, "error": str(exc)})
+
         self.send_error(404)
 
     def do_POST(self):
@@ -167,7 +244,7 @@ class Handler(BaseHTTPRequestHandler):
             store = _store()
             try:
                 settings = _load_settings()
-                provider = OAuthRedditProvider(RedditConfig.from_env())
+                provider = _make_provider()
                 result = poll_once(provider, settings, store)
                 payload = {
                     "ok": True,
@@ -203,9 +280,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/check":
             try:
-                check_connection(RedditConfig.from_env())
-                return self._json(200, {"ok": True, "message": "Reddit app-only authentication succeeded."})
-            except (ValueError, RedditError) as exc:
+                provider = _make_provider()
+                provider.check_connection()
+                name = _provider_name()
+                return self._json(200, {"ok": True, "message": f"Connection via {name} succeeded.", "provider": name})
+            except (ValueError, RedditError, TregError) as exc:
                 return self._json(400, {"ok": False, "error": str(exc)})
 
         if path == "/ignore":
