@@ -16,13 +16,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import AppPaths, RedditConfig
+from .config import AppPaths
 from .monitor import poll_once
-from .reddit import OAuthRedditProvider, RedditError, check_connection
+from . import secrets as _secrets
 from .settings import MonitorSettings
 from .store import Store
+from .treg_reddit import TregError, TregRedditProvider
 
-PHASE = "phase3-dashboard"
+PHASE = "phase4-treg"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -38,12 +39,27 @@ def _load_settings() -> MonitorSettings:
     return MonitorSettings.load(_paths().settings_path)
 
 
+def _make_provider() -> TregRedditProvider:
+    """Return the treg.to Reddit provider. Raises if TREG_TOKEN is not configured."""
+    token = _secrets.get_treg_token(_paths().data_dir)
+    if not token:
+        raise ValueError(
+            "TREG_TOKEN is not configured. Open the dashboard and use the Setup tab to enter your token — get one at https://treg.to"
+        )
+    return TregRedditProvider(token)
+
+
+def _is_configured() -> bool:
+    """True when a treg token is available (env or secrets file)."""
+    return bool(_secrets.get_treg_token(_paths().data_dir))
+
+
+def _provider_name() -> str:
+    return "treg"
+
+
 def _auth_configured() -> tuple[str, str] | None:
-    user = os.environ.get("DASHBOARD_USER", "").strip()
-    password = os.environ.get("DASHBOARD_PASSWORD", "").strip()
-    if user and password:
-        return user, password
-    return None
+    return _secrets.get_dashboard_creds(_paths().data_dir)
 
 
 def _settings_payload(settings: MonitorSettings | None = None, error: str | None = None) -> dict:
@@ -71,16 +87,32 @@ def _status_payload() -> dict:
         settings_block = _settings_payload(_load_settings())
     except ValueError as exc:
         settings_block = _settings_payload(error=str(exc))
+    creds = _auth_configured()
     return {
         "phase": PHASE,
+        "provider": _provider_name(),
+        "configured": _is_configured(),
         "paused": status.paused,
         "last_run_at": status.last_run_at,
         "last_error": status.last_error,
         "last_found": status.last_found,
         "last_message": status.last_message,
         "counts": store.counts(),
-        "auth_required": _auth_configured() is not None,
+        "auth_required": creds is not None,
+        "dashboard_user_set": creds is not None,
         **settings_block,
+    }
+
+
+def _post_to_dict(post) -> dict:
+    return {
+        "fullname": post.fullname,
+        "subreddit": post.subreddit,
+        "title": post.title,
+        "url": post.url,
+        "author": post.author,
+        "created_utc": post.created_utc,
+        "selftext": post.selftext,
     }
 
 
@@ -127,7 +159,15 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         # Health stays unauthenticated for container probes.
         if path == "/health":
-            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused()})
+            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused(), "configured": _is_configured()})
+        # /api/setup is open (no auth gate) so the dashboard can bootstrap.
+        if path == "/api/setup":
+            creds = _auth_configured()
+            return self._json(200, {
+                "configured": _is_configured(),
+                "dashboard_user_set": creds is not None,
+                "dashboard_user": creds[0] if creds else "",
+            })
         if not self._authorized():
             return self._unauthorized()
         if path in ("/", "/index.html"):
@@ -153,21 +193,100 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, _settings_payload(_load_settings()))
             except ValueError as exc:
                 return self._json(404, _settings_payload(error=str(exc)))
+
+        if path == "/api/search":
+            qs = parse_qs(parsed.query)
+            query = (qs.get("q", [""])[0] or "").strip()
+            subreddit = (qs.get("subreddit", [""])[0] or "").strip().lstrip("r/") or None
+            try:
+                limit = min(50, max(1, int(qs.get("limit", ["25"])[0])))
+            except ValueError:
+                limit = 25
+            sort = (qs.get("sort", ["relevance"])[0] or "relevance").strip()
+            timeframe = (qs.get("t", ["all"])[0] or "all").strip()
+            if not query:
+                return self._json(400, {"ok": False, "error": "q (search query) is required"})
+            try:
+                posts = _make_provider().search_posts(
+                    query, subreddit=subreddit, limit=limit, sort=sort, timeframe=timeframe
+                )
+                return self._json(200, {
+                    "ok": True,
+                    "query": query,
+                    "subreddit": subreddit,
+                    "results": [_post_to_dict(p) for p in posts],
+                })
+            except (ValueError, TregError) as exc:
+                return self._json(502, {"ok": False, "error": str(exc)})
+
+        if path.startswith("/api/matches/") and path.endswith("/comments"):
+            parts = path.split("/")
+            # /api/matches/<id>/comments → parts = ['', 'api', 'matches', '<id>', 'comments']
+            try:
+                match_id = int(parts[3])
+            except (IndexError, ValueError):
+                return self._json(400, {"ok": False, "error": "Invalid match id"})
+            match = _store().get_match(match_id)
+            if match is None:
+                return self._json(404, {"ok": False, "error": "Match not found"})
+            qs = parse_qs(parsed.query)
+            try:
+                limit = min(200, max(1, int(qs.get("limit", ["100"])[0])))
+            except ValueError:
+                limit = 100
+            try:
+                comments = _make_provider().fetch_comments(match.url, limit=limit)
+                return self._json(200, {"ok": True, "match_id": match_id, "comments": comments})
+            except (ValueError, TregError) as exc:
+                return self._json(502, {"ok": False, "error": str(exc)})
+
         self.send_error(404)
 
     def do_POST(self):
-        if not self._authorized():
-            return self._unauthorized()
         parsed = urlparse(self.path)
         path = parsed.path
         raw = self._read_body()
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
+        # /api/setup is open when nothing is configured yet (bootstrap);
+        # once a token is saved it requires dashboard auth.
+        if path == "/api/setup":
+            already_configured = _is_configured()
+            if already_configured and not self._authorized():
+                return self._unauthorized()
+            data = self._parse_body(raw, content_type)
+            token = str(data.get("treg_token") or "").strip()
+            dash_user = str(data.get("dashboard_user") or "").strip()
+            dash_pass = str(data.get("dashboard_password") or "").strip()
+            if not token and not already_configured:
+                return self._json(400, {"ok": False, "error": "treg_token is required"})
+            updates: dict = {}
+            if token:
+                updates["treg_token"] = token
+            if dash_user:
+                updates["dashboard_user"] = dash_user
+            if dash_pass:
+                updates["dashboard_password"] = dash_pass
+            # Clearing dashboard creds explicitly
+            if data.get("clear_dashboard_auth"):
+                updates["dashboard_user"] = ""
+                updates["dashboard_password"] = ""
+            if updates:
+                _secrets.save(_paths().data_dir, updates)
+            return self._json(200, {
+                "ok": True,
+                "configured": _is_configured(),
+                "dashboard_user_set": _auth_configured() is not None,
+            })
+
+        if not self._authorized():
+            return self._unauthorized()
+
         if path == "/api/poll" or path == "/poll":
             store = _store()
             try:
                 settings = _load_settings()
-                provider = OAuthRedditProvider(RedditConfig.from_env())
+                provider = _make_provider()
                 result = poll_once(provider, settings, store)
                 payload = {
                     "ok": True,
@@ -181,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/poll":
                     return self._redirect("/")
                 return self._json(200, payload)
-            except (ValueError, RedditError) as exc:
+            except (ValueError, TregError) as exc:
                 store.record_run(found=0, message=f"Poll failed: {exc}", error=str(exc))
                 if path == "/poll":
                     return self._redirect("/")
@@ -203,9 +322,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/check":
             try:
-                check_connection(RedditConfig.from_env())
-                return self._json(200, {"ok": True, "message": "Reddit app-only authentication succeeded."})
-            except (ValueError, RedditError) as exc:
+                provider = _make_provider()
+                provider.check_connection()
+                return self._json(200, {"ok": True, "message": "treg.to connection succeeded.", "provider": "treg"})
+            except (ValueError, TregError) as exc:
                 return self._json(400, {"ok": False, "error": str(exc)})
 
         if path == "/ignore":

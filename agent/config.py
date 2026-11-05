@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+TREG_TOKEN_ENV = "TREG_TOKEN"
+
 
 @dataclass(frozen=True)
 class RedditConfig:
@@ -22,6 +24,16 @@ class RedditConfig:
         if "REPLACE_ME" in values[2]:
             raise ValueError("Set REDDIT_USER_AGENT to a descriptive identifier and your username")
         return cls(*values)
+
+
+@dataclass(frozen=True)
+class TregConfig:
+    token: str = field(repr=False)
+
+    @classmethod
+    def from_env(cls) -> "TregConfig | None":
+        token = os.environ.get(TREG_TOKEN_ENV, "").strip()
+        return cls(token=token) if token else None
 
 
 @dataclass(frozen=True)
