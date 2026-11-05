@@ -1,19 +1,29 @@
-"""Local-only dashboard for read-only match review. No remote auth yet — bind to localhost."""
+"""Web dashboard for read-only Reddit match review.
+
+Optional HTTP basic auth via DASHBOARD_USER / DASHBOARD_PASSWORD when exposing
+beyond localhost. No remote auth by default — set credentials before binding
+publicly.
+"""
 from __future__ import annotations
 
-import html
+import base64
 import json
+import mimetypes
 import os
+import secrets
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from .config import AppPaths, RedditConfig
 from .monitor import poll_once
-from .reddit import OAuthRedditProvider, RedditError
+from .reddit import OAuthRedditProvider, RedditError, check_connection
 from .settings import MonitorSettings
 from .store import Store
 
-PHASE = "phase2-monitoring"
+PHASE = "phase3-dashboard"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def _paths() -> AppPaths:
@@ -24,180 +34,299 @@ def _store() -> Store:
     return Store(_paths().db_path)
 
 
-def _load_settings():
+def _load_settings() -> MonitorSettings:
     return MonitorSettings.load(_paths().settings_path)
 
 
-def _page() -> bytes:
+def _auth_configured() -> tuple[str, str] | None:
+    user = os.environ.get("DASHBOARD_USER", "").strip()
+    password = os.environ.get("DASHBOARD_PASSWORD", "").strip()
+    if user and password:
+        return user, password
+    return None
+
+
+def _settings_payload(settings: MonitorSettings | None = None, error: str | None = None) -> dict:
+    if error:
+        return {"ok": False, "error": error, "settings": None}
+    assert settings is not None
+    return {
+        "ok": True,
+        "error": None,
+        "settings": {
+            "project_name": settings.project_name,
+            "subreddits": list(settings.subreddits),
+            "keywords": list(settings.keywords),
+            "exclude_terms": list(settings.exclude_terms),
+            "poll_limit": settings.poll_limit,
+            "community_notes": dict(settings.community_notes),
+        },
+    }
+
+
+def _status_payload() -> dict:
     store = _store()
     status = store.status()
-    counts = store.counts()
-    matches = store.list_matches(limit=50)
-    settings_error = ""
-    project = "(settings not loaded)"
-    subs = []
     try:
-        settings = _load_settings()
-        project = settings.project_name
-        subs = list(settings.subreddits)
+        settings_block = _settings_payload(_load_settings())
     except ValueError as exc:
-        settings_error = str(exc)
+        settings_block = _settings_payload(error=str(exc))
+    return {
+        "phase": PHASE,
+        "paused": status.paused,
+        "last_run_at": status.last_run_at,
+        "last_error": status.last_error,
+        "last_found": status.last_found,
+        "last_message": status.last_message,
+        "counts": store.counts(),
+        "auth_required": _auth_configured() is not None,
+        **settings_block,
+    }
 
-    rows = []
-    for match in matches:
-        keywords = ", ".join(match.matched_keywords)
-        note = match.community_note or "—"
-        rows.append(
-            "<tr>"
-            f"<td><a href=\"{html.escape(match.url)}\" rel=\"noopener noreferrer\" target=\"_blank\">"
-            f"{html.escape(match.title)}</a><br><small>r/{html.escape(match.subreddit)} · "
-            f"u/{html.escape(match.author)}</small></td>"
-            f"<td>{html.escape(keywords)}</td>"
-            f"<td>{html.escape(note)}</td>"
-            f"<td>{html.escape(match.status)}</td>"
-            "<td>"
-            f"<form method=\"post\" action=\"/ignore\" style=\"display:inline\">"
-            f"<input type=\"hidden\" name=\"id\" value=\"{match.id}\">"
-            "<button type=\"submit\">Ignore</button></form>"
-            "</td>"
-            "</tr>"
-        )
-    table = (
-        "<table><thead><tr><th>Thread</th><th>Matched</th><th>Community note</th>"
-        "<th>Status</th><th></th></tr></thead><tbody>"
-        + ("".join(rows) if rows else "<tr><td colspan=\"5\">No open matches yet. Run a poll.</td></tr>")
-        + "</tbody></table>"
-    )
-    paused_label = "paused" if status.paused else "active"
-    error_block = (
-        f"<p class=\"warn\">Last error: {html.escape(status.last_error)}</p>"
-        if status.last_error
-        else ""
-    )
-    settings_block = (
-        f"<p class=\"warn\">Settings: {html.escape(settings_error)}</p>"
-        if settings_error
-        else f"<p>Project <strong>{html.escape(project)}</strong> · watching "
-        f"{html.escape(', '.join('r/' + s for s in subs) or '(none)')}</p>"
-    )
-    body = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Reddit Agent</title>
-<style>
-body{{font:16px/1.55 system-ui,sans-serif;background:#111827;color:#e5e7eb;max-width:960px;margin:4vh auto;padding:24px}}
-section{{background:#1f2937;border-radius:12px;padding:20px 24px;margin:16px 0}}
-h1{{margin:0 0 4px}} .muted{{color:#9ca3af}} strong{{color:#fdba74}}
-code,small{{color:#a7f3d0}} .warn{{color:#fca5a5}}
-table{{width:100%;border-collapse:collapse;font-size:15px}}
-th,td{{text-align:left;padding:10px 8px;border-bottom:1px solid #374151;vertical-align:top}}
-th{{color:#9ca3af;font-weight:600}}
-a{{color:#93c5fd}} button,.btn{{background:#374151;color:#e5e7eb;border:0;border-radius:8px;padding:8px 12px;cursor:pointer}}
-form.inline{{display:inline-block;margin-right:8px}}
-.actions{{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}}
-</style>
-</head>
-<body>
-<h1>Reddit Agent</h1>
-<p class="muted">Human-led research · LURK Listen stage · no posting</p>
-<section>
-<strong>Status: {paused_label}</strong>
-{settings_block}
-<p>Last run: <code>{html.escape(status.last_run_at or 'never')}</code>
-· new last poll: <code>{status.last_found}</code>
-· open: <code>{counts.get('new', 0)}</code>
-· ignored: <code>{counts.get('ignored', 0)}</code>
-· deleted: <code>{counts.get('deleted', 0)}</code></p>
-<p>{html.escape(status.last_message or 'No poll yet. Use Run poll or python -m agent.run_monitor.')}</p>
-{error_block}
-<div class="actions">
-<form class="inline" method="post" action="/poll"><button type="submit">Run poll</button></form>
-<form class="inline" method="post" action="/pause"><input type="hidden" name="paused" value="{0 if status.paused else 1}">
-<button type="submit">{'Resume' if status.paused else 'Pause'}</button></form>
-</div>
-</section>
-<section>
-<strong>Match queue</strong>
-<p class="muted">Matches are advisory. Review community rules before engaging. AI drafts and posting are not implemented.</p>
-{table}
-</section>
-</body>
-</html>"""
-    return body.encode("utf-8")
+
+def _match_dict(match) -> dict:
+    return {
+        "id": match.id,
+        "reddit_fullname": match.reddit_fullname,
+        "subreddit": match.subreddit,
+        "title": match.title,
+        "url": match.url,
+        "author": match.author,
+        "created_utc": match.created_utc,
+        "matched_keywords": list(match.matched_keywords),
+        "community_note": match.community_note,
+        "status": match.status,
+        "created_at": match.created_at,
+        "updated_at": match.updated_at,
+    }
+
+
+def _save_settings(raw: dict) -> MonitorSettings:
+    settings = MonitorSettings.from_dict(raw)
+    path = _paths().settings_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "project_name": settings.project_name,
+        "subreddits": list(settings.subreddits),
+        "keywords": list(settings.keywords),
+        "exclude_terms": list(settings.exclude_terms),
+        "poll_limit": settings.poll_limit,
+        "community_notes": dict(settings.community_notes),
+    }
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return settings
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RedditAgent/0.2"
+    server_version = "RedditAgent/0.3"
 
     def do_GET(self):
-        if self.path == "/":
-            return self._send(200, _page(), "text/html; charset=utf-8")
-        if self.path == "/health":
-            payload = {"status": "ok", "phase": PHASE, "paused": _store().get_paused()}
-            return self._send(200, json.dumps(payload).encode(), "application/json")
-        if self.path == "/api/status":
-            store = _store()
-            status = store.status()
-            payload = {
-                "phase": PHASE,
-                "paused": status.paused,
-                "last_run_at": status.last_run_at,
-                "last_error": status.last_error,
-                "last_found": status.last_found,
-                "last_message": status.last_message,
-                "counts": store.counts(),
-            }
-            return self._send(200, json.dumps(payload).encode(), "application/json")
-        if self.path == "/api/matches":
-            matches = [
-                {
-                    "id": m.id,
-                    "reddit_fullname": m.reddit_fullname,
-                    "subreddit": m.subreddit,
-                    "title": m.title,
-                    "url": m.url,
-                    "author": m.author,
-                    "matched_keywords": list(m.matched_keywords),
-                    "community_note": m.community_note,
-                    "status": m.status,
-                }
-                for m in _store().list_matches(limit=100)
-            ]
-            return self._send(200, json.dumps({"matches": matches}).encode(), "application/json")
+        parsed = urlparse(self.path)
+        path = parsed.path
+        # Health stays unauthenticated for container probes.
+        if path == "/health":
+            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused()})
+        if not self._authorized():
+            return self._unauthorized()
+        if path in ("/", "/index.html"):
+            return self._send_static("index.html")
+        if path.startswith("/static/"):
+            return self._send_static(path[len("/static/") :])
+        if path == "/api/status":
+            return self._json(200, _status_payload())
+        if path == "/api/matches":
+            qs = parse_qs(parsed.query)
+            include_ignored = qs.get("include_ignored", ["0"])[0] == "1"
+            status_filter = (qs.get("status", [""])[0] or "").strip().lower()
+            try:
+                limit = min(500, max(1, int(qs.get("limit", ["100"])[0])))
+            except ValueError:
+                limit = 100
+            matches = _store().list_matches(include_ignored=include_ignored or bool(status_filter), limit=limit)
+            if status_filter:
+                matches = [m for m in matches if m.status == status_filter]
+            return self._json(200, {"matches": [_match_dict(m) for m in matches]})
+        if path == "/api/settings":
+            try:
+                return self._json(200, _settings_payload(_load_settings()))
+            except ValueError as exc:
+                return self._json(404, _settings_payload(error=str(exc)))
         self.send_error(404)
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(length) if length else b""
-        form = parse_qs(raw.decode("utf-8", errors="replace"))
-        if self.path == "/pause":
-            paused = (form.get("paused", ["1"])[0] == "1")
+        if not self._authorized():
+            return self._unauthorized()
+        parsed = urlparse(self.path)
+        path = parsed.path
+        raw = self._read_body()
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+
+        if path == "/api/poll" or path == "/poll":
+            store = _store()
+            try:
+                settings = _load_settings()
+                provider = OAuthRedditProvider(RedditConfig.from_env())
+                result = poll_once(provider, settings, store)
+                payload = {
+                    "ok": True,
+                    "found": result.inserted,
+                    "scanned": result.scanned,
+                    "deleted": result.deleted,
+                    "paused": result.paused,
+                    "message": result.message,
+                    "status": _status_payload(),
+                }
+                if path == "/poll":
+                    return self._redirect("/")
+                return self._json(200, payload)
+            except (ValueError, RedditError) as exc:
+                store.record_run(found=0, message=f"Poll failed: {exc}", error=str(exc))
+                if path == "/poll":
+                    return self._redirect("/")
+                return self._json(400, {"ok": False, "error": str(exc), "status": _status_payload()})
+
+        if path == "/api/pause" or path == "/pause":
+            data = self._parse_body(raw, content_type)
+            paused_raw = data.get("paused", True)
+            if isinstance(paused_raw, list):
+                paused = paused_raw[0] in ("1", "true", "True", True)
+            elif isinstance(paused_raw, str):
+                paused = paused_raw in ("1", "true", "True")
+            else:
+                paused = bool(paused_raw)
             _store().set_paused(paused)
-            return self._redirect("/")
-        if self.path == "/ignore":
+            if path == "/pause":
+                return self._redirect("/")
+            return self._json(200, {"ok": True, "paused": paused, "status": _status_payload()})
+
+        if path == "/api/check":
+            try:
+                check_connection(RedditConfig.from_env())
+                return self._json(200, {"ok": True, "message": "Reddit app-only authentication succeeded."})
+            except (ValueError, RedditError) as exc:
+                return self._json(400, {"ok": False, "error": str(exc)})
+
+        if path == "/ignore":
+            form = parse_qs(raw.decode("utf-8", errors="replace"))
             try:
                 match_id = int(form.get("id", [""])[0])
             except (TypeError, ValueError):
                 return self.send_error(400, "Missing match id")
             _store().set_status(match_id, "ignored")
             return self._redirect("/")
-        if self.path == "/poll":
-            store = _store()
+
+        if path.startswith("/api/matches/") and path.endswith("/status"):
             try:
-                settings = _load_settings()
-                provider = OAuthRedditProvider(RedditConfig.from_env())
-                poll_once(provider, settings, store)
-            except (ValueError, RedditError) as exc:
-                store.record_run(found=0, message=f"Poll failed: {exc}", error=str(exc))
-            return self._redirect("/")
+                match_id = int(path.split("/")[3])
+            except (IndexError, ValueError):
+                return self._json(400, {"ok": False, "error": "Invalid match id"})
+            data = self._parse_body(raw, content_type)
+            status = data.get("status")
+            if isinstance(status, list):
+                status = status[0] if status else None
+            if not isinstance(status, str):
+                return self._json(400, {"ok": False, "error": "status is required"})
+            try:
+                updated = _store().set_status(match_id, status)
+            except ValueError as exc:
+                return self._json(400, {"ok": False, "error": str(exc)})
+            if not updated:
+                return self._json(404, {"ok": False, "error": "Match not found"})
+            return self._json(200, {"ok": True, "id": match_id, "status": status})
+
         self.send_error(404)
 
+    def do_PUT(self):
+        if not self._authorized():
+            return self._unauthorized()
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/settings":
+            return self.send_error(404)
+        raw = self._read_body()
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        data = self._parse_body(raw, content_type)
+        if not isinstance(data, dict) or "project_name" not in data:
+            # Accept either the settings object directly or wrapped.
+            if isinstance(data, dict) and isinstance(data.get("settings"), dict):
+                data = data["settings"]
+            else:
+                return self._json(400, {"ok": False, "error": "JSON settings object required"})
+        try:
+            settings = _save_settings(data)
+        except ValueError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        return self._json(200, _settings_payload(settings))
+
     def log_message(self, fmt, *args):
-        # Keep stdout clean; avoid logging query strings that might include secrets later.
-        sys_stderr = __import__("sys").stderr
-        print("%s - %s" % (self.address_string(), fmt % args), file=sys_stderr)
+        print("%s - %s" % (self.address_string(), fmt % args), file=sys.stderr)
+
+    def _authorized(self) -> bool:
+        creds = _auth_configured()
+        if creds is None:
+            return True
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            decoded = base64.b64decode(header[6:].strip()).decode("utf-8")
+            user, _, password = decoded.partition(":")
+        except Exception:
+            return False
+        expected_user, expected_password = creds
+        return secrets.compare_digest(user, expected_user) and secrets.compare_digest(
+            password, expected_password
+        )
+
+    def _unauthorized(self) -> None:
+        body = b'{"ok":false,"error":"Unauthorized"}'
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Reddit Agent"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def _parse_body(self, raw: bytes, content_type: str):
+        if not raw:
+            return {}
+        if content_type == "application/json":
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError:
+                return {}
+        form = parse_qs(raw.decode("utf-8", errors="replace"))
+        return {k: v[0] if len(v) == 1 else v for k, v in form.items()}
+
+    def _send_static(self, relative: str) -> None:
+        # Explicit allowlist — do not serve arbitrary paths.
+        allowed = {"index.html", "app.css", "app.js"}
+        name = Path(relative).name
+        if name not in allowed:
+            return self.send_error(404)
+        file_path = STATIC_DIR / name
+        if not file_path.is_file():
+            return self.send_error(404)
+        data = file_path.read_bytes()
+        if name.endswith(".js"):
+            ctype = "application/javascript; charset=utf-8"
+        elif name.endswith(".css"):
+            ctype = "text/css; charset=utf-8"
+        elif name.endswith(".html"):
+            ctype = "text/html; charset=utf-8"
+        else:
+            ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        self._send(200, data, ctype)
+
+    def _json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self._send(code, body, "application/json")
 
     def _send(self, code: int, body: bytes, content_type: str) -> None:
         self.send_response(code)
@@ -208,11 +337,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _redirect(self, location: str) -> None:
-        # 303 is correct after POST; also emit a tiny HTML fallback for clients
-        # that do not auto-follow the redirect.
         body = (
             "<!doctype html><title>Redirecting</title>"
-            f"<a href=\"{location}\">Continue</a>"
+            f'<a href="{location}">Continue</a>'
             f"<script>location.replace({location!r});</script>"
         ).encode()
         self.send_response(303)
@@ -226,4 +353,10 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     host = os.environ.get("BIND_HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8080"))
+    if host in ("0.0.0.0", "::") and _auth_configured() is None:
+        print(
+            "WARNING: Binding on all interfaces without DASHBOARD_USER/DASHBOARD_PASSWORD.",
+            file=sys.stderr,
+        )
+    print(f"Reddit Agent dashboard on http://{host}:{port}", file=sys.stderr)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

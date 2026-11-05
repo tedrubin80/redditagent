@@ -4,11 +4,19 @@ services:
     env_file: .env
     environment:
       BIND_HOST: 0.0.0.0
+      PORT: "8080"
       DATA_DIR: /app/data
       SETTINGS_PATH: /app/data/settings.json
       DB_PATH: /app/data/agent.db
     ports:
-      - "127.0.0.1:8080:8080"
+      # Reachable by host IP / URL. Set DASHBOARD_USER + DASHBOARD_PASSWORD in .env.
+      - "${HOST_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
