@@ -156,6 +156,11 @@ class Store:
             )
             return True
 
+    def get_match(self, match_id: int) -> Match | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM matches WHERE id = ?", (match_id,)).fetchone()
+        return self._row_to_match(row) if row else None
+
     def list_matches(self, *, include_ignored: bool = False, limit: int = 100) -> list[Match]:
         query = "SELECT * FROM matches"
         params: list = []

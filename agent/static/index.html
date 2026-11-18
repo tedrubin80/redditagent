@@ -10,15 +10,43 @@
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
+  <div id="setup-overlay" class="setup-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <div class="setup-box">
+      <div class="setup-logo">
+        <p class="eyebrow">Reddit Agent · first-time setup</p>
+        <h2 id="setup-title">Connect to treg.to</h2>
+        <p class="muted">All Reddit data comes through <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Paste your team token to get started — no Reddit OAuth account needed.</p>
+      </div>
+      <form id="setup-form" class="setup-form" autocomplete="off">
+        <label>treg.to token <span class="hint">required · get one at <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a></span>
+          <input name="treg_token" id="setup-token" type="password" required placeholder="treg_…" autocomplete="new-password" spellcheck="false">
+        </label>
+        <details class="setup-optional">
+          <summary>Dashboard password <span class="hint">(optional — set before exposing beyond localhost)</span></summary>
+          <div class="setup-optional-fields">
+            <label>Username
+              <input name="dashboard_user" type="text" placeholder="admin" autocomplete="new-password">
+            </label>
+            <label>Password
+              <input name="dashboard_password" type="password" placeholder="••••••••" autocomplete="new-password">
+            </label>
+          </div>
+        </details>
+        <p id="setup-error" class="setup-error hidden"></p>
+        <button type="submit" class="btn primary" id="btn-setup-save">Save and start</button>
+      </form>
+    </div>
+  </div>
+
   <div class="shell">
     <header class="top">
       <div class="brand-block">
         <p class="eyebrow">LURK · listen stage</p>
         <h1>Reddit Agent</h1>
-        <p class="lede">Human-led match review. Read-only — no AI drafts, no posting.</p>
+        <p class="lede">Human-led match review via <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Read-only — no AI drafts, no posting.</p>
       </div>
       <div class="top-actions">
-        <button type="button" id="btn-check" class="btn ghost">Check Reddit</button>
+        <button type="button" id="btn-check" class="btn ghost">Check treg</button>
         <button type="button" id="btn-pause" class="btn ghost">Pause</button>
         <button type="button" id="btn-poll" class="btn primary">Run poll</button>
       </div>
@@ -45,8 +73,42 @@
         <span class="label">Message</span>
         <strong id="stat-message">Loading…</strong>
       </div>
+      <div class="stat">
+        <span class="label">Data source</span>
+        <strong id="stat-provider">—</strong>
+      </div>
     </section>
     <p id="banner" class="banner hidden" role="status"></p>
+
+    <section class="panel search-panel" aria-labelledby="search-heading" id="search-section">
+      <div class="panel-head">
+        <div>
+          <h2 id="search-heading">Live search <span class="provider-badge" id="search-badge">treg</span></h2>
+          <p class="muted">Search Reddit in real time via treg.to — results are not stored.</p>
+        </div>
+      </div>
+      <form id="search-form" class="search-form">
+        <div class="search-row">
+          <input name="q" id="search-q" type="search" placeholder="Search Reddit…" autocomplete="off" aria-label="Search query">
+          <input name="subreddit" id="search-sub" type="text" placeholder="r/subreddit (optional)" autocomplete="off" aria-label="Subreddit filter">
+          <select name="sort" id="search-sort">
+            <option value="relevance">Relevance</option>
+            <option value="new">New</option>
+            <option value="top">Top</option>
+            <option value="hot">Hot</option>
+          </select>
+          <select name="t" id="search-t">
+            <option value="all">All time</option>
+            <option value="day">Today</option>
+            <option value="week">This week</option>
+            <option value="month">This month</option>
+            <option value="year">This year</option>
+          </select>
+          <button type="submit" class="btn primary" id="btn-search">Search</button>
+        </div>
+      </form>
+      <div id="search-results" class="search-results hidden"></div>
+    </section>
 
     <main class="layout">
       <section class="panel queue" aria-labelledby="queue-heading">
@@ -98,12 +160,40 @@
           <button type="submit" class="btn primary">Save settings</button>
         </form>
         <div class="counts" id="counts"></div>
+
+        <details class="creds-section" id="creds-section">
+          <summary class="creds-summary">Credentials <span class="hint">treg token &amp; dashboard auth</span></summary>
+          <form id="creds-form" class="settings-form" autocomplete="off" style="margin-top:.75rem">
+            <label>treg.to token <span class="hint">leave blank to keep current</span>
+              <input name="treg_token" type="password" placeholder="treg_…" autocomplete="new-password" spellcheck="false">
+            </label>
+            <label>Dashboard username
+              <input name="dashboard_user" type="text" placeholder="admin" autocomplete="new-password">
+            </label>
+            <label>Dashboard password
+              <input name="dashboard_password" type="password" placeholder="••••••••" autocomplete="new-password">
+            </label>
+            <p class="muted" style="font-size:.85rem;margin:0">Leave a field blank to keep its current value. Changes take effect immediately without restart.</p>
+            <button type="submit" class="btn primary compact">Update credentials</button>
+          </form>
+        </details>
       </aside>
     </main>
 
+    <div id="comments-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="comments-modal-title">
+      <div class="modal-backdrop"></div>
+      <div class="modal-box">
+        <div class="modal-head">
+          <h3 id="comments-modal-title">Comments</h3>
+          <button type="button" class="btn ghost compact" id="btn-close-comments">✕ Close</button>
+        </div>
+        <div id="comments-list" class="comments-list"></div>
+      </div>
+    </div>
+
     <footer class="foot">
-      <span id="phase">phase3-dashboard</span>
-      · self-hosted · Docker-ready
+      <span id="phase">phase4-treg</span>
+      · self-hosted · Docker-ready · <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>
     </footer>
   </div>
   <script src="/static/app.js"></script>

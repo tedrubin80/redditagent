@@ -6,6 +6,50 @@
   let busy = false;
   let refreshTimer = null;
 
+  // ---- Setup overlay ----
+  const setupOverlay = $("#setup-overlay");
+  const setupForm = $("#setup-form");
+  const setupError = $("#setup-error");
+
+  function showSetup() {
+    if (setupOverlay) setupOverlay.classList.remove("hidden");
+  }
+  function hideSetup() {
+    if (setupOverlay) setupOverlay.classList.add("hidden");
+  }
+
+  if (setupForm) {
+    setupForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      setupError.classList.add("hidden");
+      const btn = $("#btn-setup-save");
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      const payload = {
+        treg_token: setupForm.treg_token.value.trim(),
+        dashboard_user: setupForm.dashboard_user?.value.trim() || "",
+        dashboard_password: setupForm.dashboard_password?.value.trim() || "",
+      };
+      try {
+        const res = await api("/api/setup", { method: "POST", body: JSON.stringify(payload) });
+        if (res.ok) {
+          hideSetup();
+          await refresh();
+          showBanner("Setup complete — treg.to connected.", "ok");
+        } else {
+          setupError.textContent = res.error || "Setup failed.";
+          setupError.classList.remove("hidden");
+        }
+      } catch (err) {
+        setupError.textContent = err.message || String(err);
+        setupError.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Save and start";
+      }
+    });
+  }
+
   function showBanner(message, kind = "ok") {
     banner.textContent = message;
     banner.className = `banner ${kind}`;
@@ -78,6 +122,18 @@
     if (status.last_error) $("#stat-message").style.color = "var(--warn)";
     else $("#stat-message").style.color = "";
 
+    const providerEl = $("#stat-provider");
+    if (providerEl) {
+      providerEl.textContent = "treg.to";
+      providerEl.title = "Powered by treg.to (Crawl4AI + TikHub)";
+    }
+
+    if (status.configured === false) {
+      showSetup();
+    } else {
+      hideSetup();
+    }
+
     const pauseBtn = $("#btn-pause");
     pauseBtn.textContent = status.paused ? "Resume" : "Pause";
     pauseBtn.dataset.paused = status.paused ? "1" : "0";
@@ -120,6 +176,7 @@
     if (match.status === "ignored" || match.status === "completed") {
       actions.push(`<button type="button" class="btn compact" data-action="new" data-id="${match.id}">Reopen</button>`);
     }
+    actions.push(`<button type="button" class="btn compact ghost" data-comments-id="${match.id}">Comments</button>`);
     return `<article class="match" data-id="${match.id}">
       <h3 class="match-title"><a href="${escapeAttr(match.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(match.title)}</a></h3>
       <p class="meta">r/${escapeHtml(match.subreddit)} · u/${escapeHtml(match.author)}</p>
@@ -217,17 +274,23 @@
 
   matchesEl.addEventListener("click", (event) => {
     const btn = event.target.closest("button[data-action]");
-    if (!btn) return;
-    const id = btn.dataset.id;
-    const status = btn.dataset.action;
-    withBusy(
-      () =>
-        api(`/api/matches/${id}/status`, {
-          method: "POST",
-          body: JSON.stringify({ status }),
-        }),
-      `Marked as ${status}.`
-    );
+    if (btn) {
+      const id = btn.dataset.id;
+      const status = btn.dataset.action;
+      withBusy(
+        () =>
+          api(`/api/matches/${id}/status`, {
+            method: "POST",
+            body: JSON.stringify({ status }),
+          }),
+        `Marked as ${status}.`
+      );
+      return;
+    }
+    const commentsBtn = event.target.closest("button[data-comments-id]");
+    if (commentsBtn) {
+      openComments(commentsBtn.dataset.commentsId);
+    }
   });
 
   $("#settings-form").addEventListener("submit", (event) => {
@@ -256,6 +319,131 @@
       "Settings saved."
     );
   });
+
+  // ---- Credentials form (settings panel) ----
+  const credsForm = $("#creds-form");
+  if (credsForm) {
+    credsForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        treg_token: credsForm.treg_token.value.trim() || undefined,
+        dashboard_user: credsForm.dashboard_user.value.trim() || undefined,
+        dashboard_password: credsForm.dashboard_password.value.trim() || undefined,
+      };
+      // Strip undefined keys
+      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+      if (!Object.keys(payload).length) {
+        showBanner("No changes — fill in at least one field.", "err");
+        return;
+      }
+      await withBusy(
+        () => api("/api/setup", { method: "POST", body: JSON.stringify(payload) }),
+        "Credentials updated."
+      );
+      credsForm.reset();
+    });
+  }
+
+  // ---- Search ----
+  const searchForm = $("#search-form");
+  const searchResults = $("#search-results");
+  const searchBtn = $("#btn-search");
+
+  function renderSearchResult(post) {
+    const created = post.created_utc ? fmtTime(new Date(post.created_utc * 1000).toISOString()) : "";
+    const excerpt = post.selftext
+      ? `<p class="search-excerpt">${escapeHtml(post.selftext.slice(0, 220))}${post.selftext.length > 220 ? "…" : ""}</p>`
+      : "";
+    return `<article class="search-result">
+      <h4 class="match-title"><a href="${escapeAttr(post.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(post.title)}</a></h4>
+      <p class="meta">r/${escapeHtml(post.subreddit)} · u/${escapeHtml(post.author)}${created ? " · " + created : ""}</p>
+      ${excerpt}
+    </article>`;
+  }
+
+  if (searchForm) {
+    searchForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const q = searchForm.q.value.trim();
+      if (!q) return;
+      const sub = searchForm.subreddit.value.trim().replace(/^r\//, "");
+      const sort = searchForm.sort.value;
+      const t = searchForm.t.value;
+      searchBtn.disabled = true;
+      searchResults.innerHTML = `<div class="empty">Searching…</div>`;
+      searchResults.classList.remove("hidden");
+      try {
+        let path = `/api/search?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}&t=${encodeURIComponent(t)}`;
+        if (sub) path += `&subreddit=${encodeURIComponent(sub)}`;
+        const data = await api(path);
+        const posts = data.results || [];
+        if (!posts.length) {
+          searchResults.innerHTML = `<div class="empty">No results for "${escapeHtml(q)}".</div>`;
+        } else {
+          searchResults.innerHTML = `<p class="muted search-count">${posts.length} result${posts.length !== 1 ? "s" : ""}</p>` +
+            posts.map(renderSearchResult).join("");
+        }
+      } catch (err) {
+        searchResults.innerHTML = `<div class="empty" style="color:var(--warn)">${escapeHtml(err.message || String(err))}</div>`;
+      } finally {
+        searchBtn.disabled = false;
+      }
+    });
+  }
+
+  // ---- Comments modal ----
+  const commentsModal = $("#comments-modal");
+  const commentsList = $("#comments-list");
+  const commentsTitle = $("#comments-modal-title");
+
+  function renderComment(c) {
+    const indent = Math.min(c.depth || 0, 6);
+    const score = c.score !== null && c.score !== undefined ? `<span class="comment-score">${c.score > 0 ? "+" : ""}${c.score}</span>` : "";
+    const created = c.created ? `<span class="comment-time">${fmtTime(c.created)}</span>` : "";
+    return `<div class="comment" style="--depth:${indent}">
+      <p class="comment-meta">
+        <strong>${escapeHtml(c.author)}</strong>${score}${created}
+        ${c.url ? `<a class="comment-link" href="${escapeAttr(c.url)}" target="_blank" rel="noopener noreferrer">↗</a>` : ""}
+      </p>
+      <p class="comment-text">${escapeHtml(c.text || "(no text)")}</p>
+    </div>`;
+  }
+
+  async function openComments(matchId) {
+    commentsModal.classList.remove("hidden");
+    commentsTitle.textContent = "Loading comments…";
+    commentsList.innerHTML = `<div class="empty">Fetching from treg…</div>`;
+    try {
+      const data = await api(`/api/matches/${matchId}/comments`);
+      const comments = data.comments || [];
+      commentsTitle.textContent = `${comments.length} comment${comments.length !== 1 ? "s" : ""}`;
+      if (!comments.length) {
+        commentsList.innerHTML = `<div class="empty">No comments returned.</div>`;
+      } else {
+        commentsList.innerHTML = comments.map(renderComment).join("");
+      }
+    } catch (err) {
+      commentsTitle.textContent = "Comments";
+      commentsList.innerHTML = `<div class="empty" style="color:var(--warn)">${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+
+  function closeComments() {
+    commentsModal.classList.add("hidden");
+    commentsList.innerHTML = "";
+  }
+
+  if ($("#btn-close-comments")) {
+    $("#btn-close-comments").addEventListener("click", closeComments);
+  }
+  if (commentsModal) {
+    commentsModal.addEventListener("click", (e) => {
+      if (e.target.classList.contains("modal-backdrop")) closeComments();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !commentsModal.classList.contains("hidden")) closeComments();
+    });
+  }
 
   refresh()
     .then(() => {

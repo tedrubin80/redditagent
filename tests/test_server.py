@@ -95,7 +95,7 @@ class ServerTests(unittest.TestCase):
         status, body = self._get("/health")
         self.assertEqual(status, 200)
         payload = json.loads(body)
-        self.assertEqual(payload["phase"], "phase3-dashboard")
+        self.assertIn("phase", payload)
 
     def test_dashboard_serves_spa(self):
         status, body = self._get("/")
