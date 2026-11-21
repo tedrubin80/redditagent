@@ -35,7 +35,7 @@
         if (res.ok) {
           hideSetup();
           await refresh();
-          showBanner("Setup complete — treg.to connected.", "ok");
+          showBanner(res.message || "Session token set — treg.to connected. Logout clears it.", "ok");
         } else {
           setupError.textContent = res.error || "Setup failed.";
           setupError.classList.remove("hidden");
@@ -45,7 +45,7 @@
         setupError.classList.remove("hidden");
       } finally {
         btn.disabled = false;
-        btn.textContent = "Save and start";
+        btn.textContent = "Use for this session";
       }
     });
   }
@@ -105,7 +105,7 @@
 
   function setBusy(on) {
     busy = on;
-    ["#btn-poll", "#btn-pause", "#btn-check", "#btn-refresh"].forEach((sel) => {
+    ["#btn-poll", "#btn-pause", "#btn-check", "#btn-refresh", "#btn-logout"].forEach((sel) => {
       const el = $(sel);
       if (el) el.disabled = on;
     });
@@ -124,7 +124,8 @@
 
     const providerEl = $("#stat-provider");
     if (providerEl) {
-      providerEl.textContent = "treg.to";
+      const source = status.token_source === "session" ? " · session token" : "";
+      providerEl.textContent = `treg.to${source}`;
       providerEl.title = "Powered by treg.to (Crawl4AI + TikHub)";
     }
 
@@ -338,10 +339,24 @@
       }
       await withBusy(
         () => api("/api/setup", { method: "POST", body: JSON.stringify(payload) }),
-        "Credentials updated."
+        (r) => r.message || "Credentials updated for this session."
       );
       credsForm.reset();
     });
+  }
+
+  const logoutBtn = $("#btn-logout");
+  if (logoutBtn) {
+    logoutBtn.addEventListener("click", () =>
+      withBusy(
+        () => api("/api/logout", { method: "POST", body: "{}" }),
+        (r) => {
+          if (setupForm) setupForm.reset();
+          if (credsForm) credsForm.reset();
+          return r.message || "Logged out. Session token cleared.";
+        }
+      )
+    );
   }
 
   // ---- Search ----

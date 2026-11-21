@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import AppPaths
 from .monitor import poll_once
 from . import secrets as _secrets
+from .session import COOKIE_NAME, SESSIONS, SessionData
 from .settings import MonitorSettings
 from .store import Store
 from .treg_reddit import TregError, TregRedditProvider
@@ -39,19 +40,34 @@ def _load_settings() -> MonitorSettings:
     return MonitorSettings.load(_paths().settings_path)
 
 
-def _make_provider() -> TregRedditProvider:
+def _treg_token(session: SessionData | None = None) -> str:
+    """Prefer session paste, then env / secrets file."""
+    if session and session.has_treg():
+        return session.treg_token
+    return _secrets.get_treg_token(_paths().data_dir)
+
+
+def _make_provider(session: SessionData | None = None) -> TregRedditProvider:
     """Return the treg.to Reddit provider. Raises if TREG_TOKEN is not configured."""
-    token = _secrets.get_treg_token(_paths().data_dir)
+    token = _treg_token(session)
     if not token:
         raise ValueError(
-            "TREG_TOKEN is not configured. Open the dashboard and use the Setup tab to enter your token — get one at https://treg.to"
+            "TREG_TOKEN is not configured. Open the dashboard and paste your token — get one at https://treg.to"
         )
     return TregRedditProvider(token)
 
 
-def _is_configured() -> bool:
-    """True when a treg token is available (env or secrets file)."""
-    return bool(_secrets.get_treg_token(_paths().data_dir))
+def _is_configured(session: SessionData | None = None) -> bool:
+    """True when a treg token is available (session, env, or secrets file)."""
+    return bool(_treg_token(session))
+
+
+def _token_source(session: SessionData | None = None) -> str | None:
+    if session and session.has_treg():
+        return "session"
+    if _secrets.get_treg_token(_paths().data_dir):
+        return "env" if os.environ.get("TREG_TOKEN", "").strip() else "secrets"
+    return None
 
 
 def _provider_name() -> str:
@@ -80,7 +96,7 @@ def _settings_payload(settings: MonitorSettings | None = None, error: str | None
     }
 
 
-def _status_payload() -> dict:
+def _status_payload(session: SessionData | None = None) -> dict:
     store = _store()
     status = store.status()
     try:
@@ -91,7 +107,8 @@ def _status_payload() -> dict:
     return {
         "phase": PHASE,
         "provider": _provider_name(),
-        "configured": _is_configured(),
+        "configured": _is_configured(session),
+        "token_source": _token_source(session),
         "paused": status.paused,
         "last_run_at": status.last_run_at,
         "last_error": status.last_error,
@@ -159,23 +176,32 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         # Health stays unauthenticated for container probes.
         if path == "/health":
-            return self._json(200, {"status": "ok", "phase": PHASE, "paused": _store().get_paused(), "configured": _is_configured()})
+            return self._json(
+                200,
+                {"status": "ok", "phase": PHASE, "paused": _store().get_paused(), "configured": _is_configured()},
+            )
+        sid, session = self._ensure_session()
         # /api/setup is open (no auth gate) so the dashboard can bootstrap.
         if path == "/api/setup":
             creds = _auth_configured()
-            return self._json(200, {
-                "configured": _is_configured(),
-                "dashboard_user_set": creds is not None,
-                "dashboard_user": creds[0] if creds else "",
-            })
+            return self._json(
+                200,
+                {
+                    "configured": _is_configured(session),
+                    "token_source": _token_source(session),
+                    "dashboard_user_set": creds is not None,
+                    "dashboard_user": creds[0] if creds else "",
+                },
+                sid=sid,
+            )
         if not self._authorized():
             return self._unauthorized()
         if path in ("/", "/index.html"):
-            return self._send_static("index.html")
+            return self._send_static("index.html", sid=sid)
         if path.startswith("/static/"):
-            return self._send_static(path[len("/static/") :])
+            return self._send_static(path[len("/static/") :], sid=sid)
         if path == "/api/status":
-            return self._json(200, _status_payload())
+            return self._json(200, _status_payload(session), sid=sid)
         if path == "/api/matches":
             qs = parse_qs(parsed.query)
             include_ignored = qs.get("include_ignored", ["0"])[0] == "1"
@@ -187,12 +213,12 @@ class Handler(BaseHTTPRequestHandler):
             matches = _store().list_matches(include_ignored=include_ignored or bool(status_filter), limit=limit)
             if status_filter:
                 matches = [m for m in matches if m.status == status_filter]
-            return self._json(200, {"matches": [_match_dict(m) for m in matches]})
+            return self._json(200, {"matches": [_match_dict(m) for m in matches]}, sid=sid)
         if path == "/api/settings":
             try:
-                return self._json(200, _settings_payload(_load_settings()))
+                return self._json(200, _settings_payload(_load_settings()), sid=sid)
             except ValueError as exc:
-                return self._json(404, _settings_payload(error=str(exc)))
+                return self._json(404, _settings_payload(error=str(exc)), sid=sid)
 
         if path == "/api/search":
             qs = parse_qs(parsed.query)
@@ -205,19 +231,23 @@ class Handler(BaseHTTPRequestHandler):
             sort = (qs.get("sort", ["relevance"])[0] or "relevance").strip()
             timeframe = (qs.get("t", ["all"])[0] or "all").strip()
             if not query:
-                return self._json(400, {"ok": False, "error": "q (search query) is required"})
+                return self._json(400, {"ok": False, "error": "q (search query) is required"}, sid=sid)
             try:
-                posts = _make_provider().search_posts(
+                posts = _make_provider(session).search_posts(
                     query, subreddit=subreddit, limit=limit, sort=sort, timeframe=timeframe
                 )
-                return self._json(200, {
-                    "ok": True,
-                    "query": query,
-                    "subreddit": subreddit,
-                    "results": [_post_to_dict(p) for p in posts],
-                })
+                return self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "query": query,
+                        "subreddit": subreddit,
+                        "results": [_post_to_dict(p) for p in posts],
+                    },
+                    sid=sid,
+                )
             except (ValueError, TregError) as exc:
-                return self._json(502, {"ok": False, "error": str(exc)})
+                return self._json(502, {"ok": False, "error": str(exc)}, sid=sid)
 
         if path.startswith("/api/matches/") and path.endswith("/comments"):
             parts = path.split("/")
@@ -225,20 +255,22 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 match_id = int(parts[3])
             except (IndexError, ValueError):
-                return self._json(400, {"ok": False, "error": "Invalid match id"})
+                return self._json(400, {"ok": False, "error": "Invalid match id"}, sid=sid)
             match = _store().get_match(match_id)
             if match is None:
-                return self._json(404, {"ok": False, "error": "Match not found"})
+                return self._json(404, {"ok": False, "error": "Match not found"}, sid=sid)
             qs = parse_qs(parsed.query)
             try:
                 limit = min(200, max(1, int(qs.get("limit", ["100"])[0])))
             except ValueError:
                 limit = 100
             try:
-                comments = _make_provider().fetch_comments(match.url, limit=limit)
-                return self._json(200, {"ok": True, "match_id": match_id, "comments": comments})
+                comments = _make_provider(session).fetch_comments(match.url, limit=limit)
+                return self._json(
+                    200, {"ok": True, "match_id": match_id, "comments": comments}, sid=sid
+                )
             except (ValueError, TregError) as exc:
-                return self._json(502, {"ok": False, "error": str(exc)})
+                return self._json(502, {"ok": False, "error": str(exc)}, sid=sid)
 
         self.send_error(404)
 
@@ -247,11 +279,18 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         raw = self._read_body()
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        sid, session = self._ensure_session()
+
+        if path == "/api/logout" or path == "/logout":
+            SESSIONS.delete(sid)
+            if path == "/logout":
+                return self._logout_redirect()
+            return self._logout_json()
 
         # /api/setup is open when nothing is configured yet (bootstrap);
-        # once a token is saved it requires dashboard auth.
+        # once a token is present it requires dashboard auth.
         if path == "/api/setup":
-            already_configured = _is_configured()
+            already_configured = _is_configured(session)
             if already_configured and not self._authorized():
                 return self._unauthorized()
             data = self._parse_body(raw, content_type)
@@ -259,10 +298,11 @@ class Handler(BaseHTTPRequestHandler):
             dash_user = str(data.get("dashboard_user") or "").strip()
             dash_pass = str(data.get("dashboard_password") or "").strip()
             if not token and not already_configured:
-                return self._json(400, {"ok": False, "error": "treg_token is required"})
-            updates: dict = {}
+                return self._json(400, {"ok": False, "error": "treg_token is required"}, sid=sid)
+            # Token pasted in the UI stays in-memory for this browser session only.
             if token:
-                updates["treg_token"] = token
+                session.treg_token = token
+            updates: dict = {}
             if dash_user:
                 updates["dashboard_user"] = dash_user
             if dash_pass:
@@ -273,11 +313,17 @@ class Handler(BaseHTTPRequestHandler):
                 updates["dashboard_password"] = ""
             if updates:
                 _secrets.save(_paths().data_dir, updates)
-            return self._json(200, {
-                "ok": True,
-                "configured": _is_configured(),
-                "dashboard_user_set": _auth_configured() is not None,
-            })
+            return self._json(
+                200,
+                {
+                    "ok": True,
+                    "configured": _is_configured(session),
+                    "token_source": _token_source(session),
+                    "dashboard_user_set": _auth_configured() is not None,
+                    "message": "Token stored for this session only. Logout clears it.",
+                },
+                sid=sid,
+            )
 
         if not self._authorized():
             return self._unauthorized()
@@ -286,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
             store = _store()
             try:
                 settings = _load_settings()
-                provider = _make_provider()
+                provider = _make_provider(session)
                 result = poll_once(provider, settings, store)
                 payload = {
                     "ok": True,
@@ -295,16 +341,18 @@ class Handler(BaseHTTPRequestHandler):
                     "deleted": result.deleted,
                     "paused": result.paused,
                     "message": result.message,
-                    "status": _status_payload(),
+                    "status": _status_payload(session),
                 }
                 if path == "/poll":
-                    return self._redirect("/")
-                return self._json(200, payload)
+                    return self._redirect("/", sid=sid)
+                return self._json(200, payload, sid=sid)
             except (ValueError, TregError) as exc:
                 store.record_run(found=0, message=f"Poll failed: {exc}", error=str(exc))
                 if path == "/poll":
-                    return self._redirect("/")
-                return self._json(400, {"ok": False, "error": str(exc), "status": _status_payload()})
+                    return self._redirect("/", sid=sid)
+                return self._json(
+                    400, {"ok": False, "error": str(exc), "status": _status_payload(session)}, sid=sid
+                )
 
         if path == "/api/pause" or path == "/pause":
             data = self._parse_body(raw, content_type)
@@ -317,16 +365,22 @@ class Handler(BaseHTTPRequestHandler):
                 paused = bool(paused_raw)
             _store().set_paused(paused)
             if path == "/pause":
-                return self._redirect("/")
-            return self._json(200, {"ok": True, "paused": paused, "status": _status_payload()})
+                return self._redirect("/", sid=sid)
+            return self._json(
+                200, {"ok": True, "paused": paused, "status": _status_payload(session)}, sid=sid
+            )
 
         if path == "/api/check":
             try:
-                provider = _make_provider()
+                provider = _make_provider(session)
                 provider.check_connection()
-                return self._json(200, {"ok": True, "message": "treg.to connection succeeded.", "provider": "treg"})
+                return self._json(
+                    200,
+                    {"ok": True, "message": "treg.to connection succeeded.", "provider": "treg"},
+                    sid=sid,
+                )
             except (ValueError, TregError) as exc:
-                return self._json(400, {"ok": False, "error": str(exc)})
+                return self._json(400, {"ok": False, "error": str(exc)}, sid=sid)
 
         if path == "/ignore":
             form = parse_qs(raw.decode("utf-8", errors="replace"))
@@ -335,26 +389,26 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return self.send_error(400, "Missing match id")
             _store().set_status(match_id, "ignored")
-            return self._redirect("/")
+            return self._redirect("/", sid=sid)
 
         if path.startswith("/api/matches/") and path.endswith("/status"):
             try:
                 match_id = int(path.split("/")[3])
             except (IndexError, ValueError):
-                return self._json(400, {"ok": False, "error": "Invalid match id"})
+                return self._json(400, {"ok": False, "error": "Invalid match id"}, sid=sid)
             data = self._parse_body(raw, content_type)
             status = data.get("status")
             if isinstance(status, list):
                 status = status[0] if status else None
             if not isinstance(status, str):
-                return self._json(400, {"ok": False, "error": "status is required"})
+                return self._json(400, {"ok": False, "error": "status is required"}, sid=sid)
             try:
                 updated = _store().set_status(match_id, status)
             except ValueError as exc:
-                return self._json(400, {"ok": False, "error": str(exc)})
+                return self._json(400, {"ok": False, "error": str(exc)}, sid=sid)
             if not updated:
-                return self._json(404, {"ok": False, "error": "Match not found"})
-            return self._json(200, {"ok": True, "id": match_id, "status": status})
+                return self._json(404, {"ok": False, "error": "Match not found"}, sid=sid)
+            return self._json(200, {"ok": True, "id": match_id, "status": status}, sid=sid)
 
         self.send_error(404)
 
@@ -362,6 +416,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._unauthorized()
         parsed = urlparse(self.path)
+        sid, _session = self._ensure_session()
         if parsed.path != "/api/settings":
             return self.send_error(404)
         raw = self._read_body()
@@ -372,15 +427,39 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(data, dict) and isinstance(data.get("settings"), dict):
                 data = data["settings"]
             else:
-                return self._json(400, {"ok": False, "error": "JSON settings object required"})
+                return self._json(400, {"ok": False, "error": "JSON settings object required"}, sid=sid)
         try:
             settings = _save_settings(data)
         except ValueError as exc:
-            return self._json(400, {"ok": False, "error": str(exc)})
-        return self._json(200, _settings_payload(settings))
+            return self._json(400, {"ok": False, "error": str(exc)}, sid=sid)
+        return self._json(200, _settings_payload(settings), sid=sid)
 
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args), file=sys.stderr)
+
+    def _cookie_sid(self) -> str | None:
+        raw = self.headers.get("Cookie", "")
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME and value:
+                return value
+        return None
+
+    def _ensure_session(self) -> tuple[str, SessionData]:
+        return SESSIONS.get_or_create(self._cookie_sid())
+
+    def _set_cookie_header(self, sid: str | None, *, clear: bool = False) -> None:
+        if clear:
+            self.send_header(
+                "Set-Cookie",
+                f"{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+            )
+            return
+        if sid:
+            self.send_header(
+                "Set-Cookie",
+                f"{COOKIE_NAME}={sid}; Path=/; HttpOnly; SameSite=Strict",
+            )
 
     def _authorized(self) -> bool:
         creds = _auth_configured()
@@ -406,6 +485,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._set_cookie_header(None, clear=True)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _logout_json(self) -> None:
+        body = json.dumps(
+            {
+                "ok": True,
+                "message": "Session cleared. Pasted API token was removed.",
+                "configured": _is_configured(None),
+                "token_source": _token_source(None),
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self._set_cookie_header(None, clear=True)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _logout_redirect(self) -> None:
+        body = (
+            b"<!doctype html><title>Logged out</title>"
+            b"<p>Session cleared.</p><script>location.replace('/');</script>"
+        )
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._set_cookie_header(None, clear=True)
         self.end_headers()
         self.wfile.write(body)
 
@@ -424,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(raw.decode("utf-8", errors="replace"))
         return {k: v[0] if len(v) == 1 else v for k, v in form.items()}
 
-    def _send_static(self, relative: str) -> None:
+    def _send_static(self, relative: str, sid: str | None = None) -> None:
         # Explicit allowlist — do not serve arbitrary paths.
         allowed = {"index.html", "app.css", "app.js"}
         name = Path(relative).name
@@ -442,21 +552,23 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "text/html; charset=utf-8"
         else:
             ctype = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
-        self._send(200, data, ctype)
+        self._send(200, data, ctype, sid=sid)
 
-    def _json(self, code: int, payload: dict) -> None:
+    def _json(self, code: int, payload: dict, sid: str | None = None) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self._send(code, body, "application/json")
+        self._send(code, body, "application/json", sid=sid)
 
-    def _send(self, code: int, body: bytes, content_type: str) -> None:
+    def _send(self, code: int, body: bytes, content_type: str, sid: str | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if sid:
+            self._set_cookie_header(sid)
         self.end_headers()
         self.wfile.write(body)
 
-    def _redirect(self, location: str) -> None:
+    def _redirect(self, location: str, sid: str | None = None) -> None:
         body = (
             "<!doctype html><title>Redirecting</title>"
             f'<a href="{location}">Continue</a>'
@@ -466,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if sid:
+            self._set_cookie_header(sid)
         self.end_headers()
         self.wfile.write(body)
 

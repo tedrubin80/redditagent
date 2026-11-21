@@ -15,14 +15,14 @@
       <div class="setup-logo">
         <p class="eyebrow">Reddit Agent · first-time setup</p>
         <h2 id="setup-title">Connect to treg.to</h2>
-        <p class="muted">All Reddit data comes through <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Paste your team token to get started — no Reddit OAuth account needed.</p>
+        <p class="muted">All Reddit data comes through <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a>. Paste your team token for this browser session — Logout clears it. No Reddit OAuth account needed.</p>
       </div>
       <form id="setup-form" class="setup-form" autocomplete="off">
-        <label>treg.to token <span class="hint">required · get one at <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a></span>
+        <label>treg.to token <span class="hint">session only · get one at <a href="https://treg.to" target="_blank" rel="noopener noreferrer">treg.to</a></span>
           <input name="treg_token" id="setup-token" type="password" required placeholder="treg_…" autocomplete="new-password" spellcheck="false">
         </label>
         <details class="setup-optional">
-          <summary>Dashboard password <span class="hint">(optional — set before exposing beyond localhost)</span></summary>
+          <summary>Dashboard password <span class="hint">(optional — saved for the server; set before exposing beyond localhost)</span></summary>
           <div class="setup-optional-fields">
             <label>Username
               <input name="dashboard_user" type="text" placeholder="admin" autocomplete="new-password">
@@ -33,7 +33,7 @@
           </div>
         </details>
         <p id="setup-error" class="setup-error hidden"></p>
-        <button type="submit" class="btn primary" id="btn-setup-save">Save and start</button>
+        <button type="submit" class="btn primary" id="btn-setup-save">Use for this session</button>
       </form>
     </div>
   </div>
@@ -49,6 +49,7 @@
         <button type="button" id="btn-check" class="btn ghost">Check treg</button>
         <button type="button" id="btn-pause" class="btn ghost">Pause</button>
         <button type="button" id="btn-poll" class="btn primary">Run poll</button>
+        <button type="button" id="btn-logout" class="btn ghost">Logout</button>
       </div>
     </header>
 
@@ -164,7 +165,7 @@
         <details class="creds-section" id="creds-section">
           <summary class="creds-summary">Credentials <span class="hint">treg token &amp; dashboard auth</span></summary>
           <form id="creds-form" class="settings-form" autocomplete="off" style="margin-top:.75rem">
-            <label>treg.to token <span class="hint">leave blank to keep current</span>
+            <label>treg.to token <span class="hint">session only · cleared on Logout</span>
               <input name="treg_token" type="password" placeholder="treg_…" autocomplete="new-password" spellcheck="false">
             </label>
             <label>Dashboard username
@@ -173,7 +174,7 @@
             <label>Dashboard password
               <input name="dashboard_password" type="password" placeholder="••••••••" autocomplete="new-password">
             </label>
-            <p class="muted" style="font-size:.85rem;margin:0">Leave a field blank to keep its current value. Changes take effect immediately without restart.</p>
+            <p class="muted" style="font-size:.85rem;margin:0">Token stays in this browser session only. Dashboard username/password are saved on the server. Leave a field blank to keep its current value.</p>
             <button type="submit" class="btn primary compact">Update credentials</button>
           </form>
         </details>

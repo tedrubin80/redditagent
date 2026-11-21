@@ -50,12 +50,13 @@ python3 -m unittest discover -s tests -v
 
 The web UI (served from the same Docker container) lets you:
 
+- Paste a treg.to token for the current browser session (cleared on **Logout**; not written to disk)
 - See live status, last poll message, and match counts
-- Run a poll, pause/resume monitoring, and verify Reddit credentials
+- Run a poll, pause/resume monitoring, and verify the treg connection
 - Filter the match queue and mark items reviewing / done / ignored
 - Edit allowlisted subreddits, keywords, excludes, and community notes
 
-JSON APIs: `/api/status`, `/api/matches`, `/api/settings`, `/api/poll`, `/api/pause`, `/api/check`, `/api/matches/<id>/status`. `/health` stays open for container probes.
+JSON APIs: `/api/status`, `/api/setup`, `/api/logout`, `/api/matches`, `/api/settings`, `/api/poll`, `/api/pause`, `/api/check`, `/api/matches/<id>/status`. `/health` stays open for container probes. Session tokens take precedence over `TREG_TOKEN` / `data/secrets.json` for dashboard requests; CLI tools still use env/secrets.
 
 ## What works now
 
@@ -67,6 +68,7 @@ JSON APIs: `/api/status`, `/api/matches`, `/api/settings`, `/api/poll`, `/api/pa
 | Allowlisted subreddit + keyword poll | Yes |
 | Exclude terms, dedupe, ignore, pause, review states | Yes |
 | In-browser settings editor | Yes |
+| Session-only treg token paste + logout purge | Yes |
 | Deletion reconciliation via `/api/info` | Yes (best-effort) |
 | AI draft replies | Not yet (Phase 4) |
 | Posting to Reddit | Not yet / optional gated (Phase 5) |
